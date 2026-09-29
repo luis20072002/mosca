@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mosca conectoma resolviendo un cubo de Rubik</title>
+<style>
+ :root{--bg:#0b0d12;--panel:#141822;--line:#232a38;--fg:#e8ecf4;--dim:#8b96ab;--acc:#5ad1a0}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,Segoe UI,sans-serif}
+ header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;gap:22px;align-items:baseline;flex-wrap:wrap}
+ h1{font-size:18px;margin:0;font-weight:650}
+ header .s{color:var(--dim);font-size:12.5px}
+ header .s b{color:var(--acc);font-weight:600}
+ main{display:grid;grid-template-columns:minmax(320px,1fr) minmax(340px,1.25fr);gap:16px;padding:16px;align-items:start}
+ .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+ .panel h2{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--dim);margin:0 0 10px}
+ #cube{width:100%;aspect-ratio:1.15;max-height:52vh;border-radius:8px;overflow:hidden}
+ #cube canvas{width:100%!important;height:100%!important;display:block}
+ .ctl{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center}
+ button{background:#1e2533;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:9px 15px;font:inherit;font-weight:550;cursor:pointer}
+ button:hover:not(:disabled){border-color:var(--acc);color:var(--acc)}
+ button:disabled{opacity:.4;cursor:default}
+ button.primary{background:var(--acc);color:#06281c;border-color:var(--acc)}
+ button.primary:hover:not(:disabled){color:#06281c}
+ canvas.plot{width:100%;display:block;border-radius:6px;background:#0a0c11}
+ .legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:9px;font-size:11.5px;color:var(--dim)}
+ .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+ table{width:100%;border-collapse:collapse;font-size:12.5px}
+ td{padding:3px 0}td:first-child{color:var(--dim)}td:last-child{text-align:right;font-variant-numeric:tabular-nums}
+ .bars{display:grid;grid-template-columns:auto 1fr auto;gap:6px 10px;align-items:center;font-size:12.5px}
+ .bar{height:9px;background:#1c2331;border-radius:5px;overflow:hidden}
+ .bar>div{height:100%;background:var(--acc);border-radius:5px;transition:width .25s}
+ .mv{font-weight:700;font-variant-numeric:tabular-nums}
+ #log{font-size:12.5px;color:var(--dim);margin-top:10px;min-height:20px}
+ #seq{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;color:var(--acc);word-spacing:6px;margin-top:6px}
+ @media(max-width:860px){main{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>🪰 Conectoma de <i>Drosophila</i> resolviendo un cubo de Rubik</h1>
+  <span class="s">Datos: MaleCNS v1.0 — HHMI Janelia / Cambridge / Google Research</span>
+  <span class="s" id="stats"></span>
+</header>
+<main>
+  <section class="panel">
+    <h2>Cubo</h2>
+    <div id="cube"></div>
+    <div class="ctl">
+      <button id="btnScramble">Revolver</button>
+      <button id="btnStep">Un giro</button>
+      <button id="btnAuto" class="primary">Resolver</button>
+      <span class="s" id="status"></span>
+    </div>
+    <div id="seq"></div>
+    <div id="log"></div>
+  </section>
+
+  <section style="display:grid;gap:16px">
+    <div class="panel">
+      <h2>Actividad neuronal — raster de 40 ms simulados</h2>
+      <canvas class="plot" id="raster" height="420"></canvas>
+      <div class="legend" id="legend"></div>
+    </div>
+    <div class="panel">
+      <h2>Voto de las neuronas descendentes → giro elegido</h2>
+      <div class="bars" id="bars"></div>
+    </div>
+    <div class="panel">
+      <h2>Tasa de disparo por población (Hz)</h2>
+      <table id="rates"></table>
+    </div>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const FACES="URFDLB";
+const COL=[0xf5f7fa,0xd93b3b,0x2fae5e,0xf2c53d,0xe07b2a,0x2f6fd0];
+const AX={U:[0,1,0],D:[0,-1,0],R:[1,0,0],L:[-1,0,0],F:[0,0,1],B:[0,0,-1]};
+const POPC={retina:"#7fc4ff",vpn:"#7fc4ff",kc:"#ffd166",dan:"#ef476f",mbon:"#f78c6b",cx:"#a78bfa",dn:"#5ad1a0"};
+
+function coords(i){
+  const f=FACES[Math.floor(i/9)], r=Math.floor((i%9)/3), c=i%3;
+  let p;
+  if(f=="U")      p=[c-1,1,r-1];
+  else if(f=="F") p=[c-1,1-r,1];
+  else if(f=="R") p=[1,1-r,1-c];
+  else if(f=="D") p=[c-1,-1,1-r];
+  else if(f=="L") p=[-1,1-r,c-1];
+  else            p=[1-c,1-r,-1];
+  return {p:p, n:AX[f]};
+}
+
+/* ---------------------------------------------------------------- escena 3D */
+const host=document.getElementById("cube");
+const scene=new THREE.Scene();
+const cam=new THREE.PerspectiveCamera(34,1,.1,100); cam.position.set(4.9,4.0,5.7); cam.lookAt(0,0,0);
+const ren=new THREE.WebGLRenderer({antialias:true,alpha:true}); ren.setPixelRatio(devicePixelRatio);
+host.appendChild(ren.domElement);
+scene.add(new THREE.AmbientLight(0xffffff,.95));
+const dl=new THREE.DirectionalLight(0xffffff,.55); dl.position.set(5,8,6); scene.add(dl);
+const root=new THREE.Group(); scene.add(root);
+root.add(new THREE.Mesh(new THREE.BoxGeometry(2.96,2.96,2.96),new THREE.MeshBasicMaterial({color:0x0c0f15})));
+const tiles=[];
+for(let i=0;i<54;i++){
+  const cd=coords(i), p=cd.p, n=cd.n;
+  const m=new THREE.Mesh(new THREE.PlaneGeometry(.88,.88),
+        new THREE.MeshLambertMaterial({color:COL[Math.floor(i/9)],side:THREE.DoubleSide}));
+  m.position.set(p[0]+n[0]*0.5,p[1]+n[1]*0.5,p[2]+n[2]*0.5);
+  m.lookAt(m.position.clone().add(new THREE.Vector3(n[0],n[1],n[2])));
+  m.userData={p:p,n:n,q:m.quaternion.clone()}; root.add(m); tiles.push(m);
+}
+function resetTiles(){
+  tiles.forEach(function(t){
+    const p=t.userData.p, n=t.userData.n;
+    t.position.set(p[0]+n[0]*0.5,p[1]+n[1]*0.5,p[2]+n[2]*0.5);
+    t.quaternion.copy(t.userData.q);   // orientacion guardada: lookAt usa espacio
+                                       // de mundo y el cubo esta rotando
+  });
+}
+
+/* ---------------------------------------------------------------- la mosca */
+const wings=[], fly=new THREE.Group();
+(function buildFly(){
+  const tan=0xcfa63a, dark=0x3c2f12;
+  const thorax=new THREE.Mesh(new THREE.SphereGeometry(.22,16,12),new THREE.MeshLambertMaterial({color:tan}));
+  thorax.scale.set(1,.85,1.1); fly.add(thorax);
+  const abd=new THREE.Mesh(new THREE.SphereGeometry(.2,16,12),new THREE.MeshLambertMaterial({color:dark}));
+  abd.scale.set(.85,.8,1.7); abd.position.z=-.44; fly.add(abd);
+  const head=new THREE.Mesh(new THREE.SphereGeometry(.17,16,12),new THREE.MeshLambertMaterial({color:tan}));
+  head.position.z=.29; fly.add(head);
+  [-1,1].forEach(function(s){
+    const eye=new THREE.Mesh(new THREE.SphereGeometry(.105,12,10),new THREE.MeshLambertMaterial({color:0xd6303a}));
+    eye.position.set(.11*s,.04,.34); fly.add(eye);
+    const w=new THREE.Mesh(new THREE.PlaneGeometry(.66,.27),
+      new THREE.MeshBasicMaterial({color:0xe4ecf7,transparent:true,opacity:.34,side:THREE.DoubleSide}));
+    w.position.set(.32*s,.17,-.24); w.userData.s=s; fly.add(w); wings.push(w);
+    for(let i=0;i<3;i++){
+      const leg=new THREE.Mesh(new THREE.CylinderGeometry(.02,.012,.36,6),new THREE.MeshLambertMaterial({color:dark}));
+      leg.position.set(.17*s,-.19,.13-i*.19); leg.rotation.z=s*.75; leg.rotation.x=-.3+i*.2; fly.add(leg);
+    }
+  });
+})();
+fly.scale.setScalar(.95); root.add(fly);
+
+const flyPos=new THREE.Vector3(3.2,1.8,2.6), flyTarget=new THREE.Vector3();
+let pushFace=null;
+function flyPush(face){ pushFace=face; }
+function flyRelease(){ pushFace=null; }
+function updateFly(t){
+  wings.forEach(function(w){ w.rotation.z=w.userData.s*(.25+Math.sin(t*42)*.85); });
+  if(pushFace){                                   // se apoya en la cara que gira
+    const a=AX[pushFace], d=2.55+Math.sin(t*14)*.14;
+    flyTarget.set(a[0]*d+a[1]*.5, a[1]*d+a[2]*.5, a[2]*d+a[0]*.5);
+  }else{                                          // merodea alrededor del cubo
+    flyTarget.set(Math.cos(t*.55)*3.9, 1.7+Math.sin(t*.9)*1.0, Math.sin(t*.55)*3.9);
+  }
+  flyPos.lerp(flyTarget,.07);
+  fly.position.copy(flyPos);
+  fly.position.y+=Math.sin(t*7)*.05;
+  fly.lookAt(0,0,0);
+}
+
+function resize(){const w=host.clientWidth,h=host.clientHeight;ren.setSize(w,h,false);cam.aspect=w/h;cam.updateProjectionMatrix();}
+addEventListener("resize",resize); resize();
+let spin=0;
+(function loop(){spin+=.0022;root.rotation.y=Math.sin(spin)*.28;
+  updateFly(performance.now()/1000);
+  ren.render(scene,cam);requestAnimationFrame(loop);})();
+function paint(state){for(let i=0;i<54;i++)tiles[i].material.color.setHex(COL[state[i]]);}
+
+function animateMove(mv,then){
+  const face=mv[0], axis=AX[face];
+  let k=0; for(let j=0;j<3;j++) if(axis[j]!==0) k=j;
+  const turns=mv.charAt(mv.length-1)=="2"?2:1;
+  const dir=mv.charAt(mv.length-1)=="'"?1:-1;
+  const pivot=new THREE.Group(); root.add(pivot); flyPush(face);
+  const moved=tiles.filter(function(t){return t.userData.p[k]===axis[k];});
+  moved.forEach(function(t){pivot.attach(t);});
+  const target=dir*Math.PI/2*turns, dur=300*turns, t0=performance.now();
+  const vax=new THREE.Vector3(axis[0],axis[1],axis[2]).normalize();
+  (function step(now){
+    const u=Math.min(1,(now-t0)/dur);
+    const e=u<.5?2*u*u:1-Math.pow(-2*u+2,2)/2;
+    pivot.rotation.set(0,0,0);
+    pivot.rotateOnAxis(vax,target*e);
+    if(u<1) requestAnimationFrame(step);
+    else{
+      moved.forEach(function(t){root.attach(t);});
+      resetTiles(); root.remove(pivot); flyRelease(); then();
+    }
+  })(t0);
+}
+
+/* ---------------------------------------------------------------- graficas */
+let INFO=null;
+const rc=document.getElementById("raster");
+function drawRaster(spikes){
+  const dpr=devicePixelRatio, W=rc.clientWidth, H=420;
+  rc.width=W*dpr; rc.height=H*dpr;
+  const g=rc.getContext("2d"); g.scale(dpr,dpr);
+  g.fillStyle="#0a0c11"; g.fillRect(0,0,W,H);
+  const nr=INFO.n_rows, T=INFO.steps;
+  INFO.pops.forEach(function(p){
+    const y0=p.r0/nr*H, y1=p.r1/nr*H;
+    g.fillStyle=POPC[p.key]+"14"; g.fillRect(0,y0,W,y1-y0);
+    g.fillStyle=POPC[p.key]; g.font="10px system-ui"; g.globalAlpha=.8;
+    g.fillText(p.name,6,y0+11); g.globalAlpha=1;
+  });
+  function rowPop(r){
+    for(let i=0;i<INFO.pops.length;i++){const p=INFO.pops[i]; if(r>=p.r0&&r<p.r1) return p;}
+    return INFO.pops[0];
+  }
+  spikes.forEach(function(sp){
+    g.fillStyle=POPC[rowPop(sp[1]).key];
+    g.fillRect(sp[0]/T*W, sp[1]/nr*H, Math.max(1.4,W/T*.7), Math.max(1.1,H/nr));
+  });
+  g.strokeStyle="#232a38"; g.strokeRect(.5,.5,W-1,H-1);
+  g.fillStyle="#8b96ab"; g.font="10px system-ui";
+  g.fillText("0 ms",4,H-4); g.fillText(T+" ms",W-38,H-4);
+}
+function drawBars(probs,chosen){
+  const el=document.getElementById("bars"); el.innerHTML="";
+  INFO.moves.forEach(function(m,i){
+    const on=(m===chosen);
+    el.insertAdjacentHTML("beforeend",
+      '<span class="mv" style="color:'+(on?"var(--acc)":"var(--fg)")+'">'+m+'</span>'+
+      '<span class="bar"><div style="width:'+(probs[i]*100).toFixed(1)+'%;background:'+(on?"var(--acc)":"#39445a")+'"></div></span>'+
+      '<span style="color:var(--dim)">'+(probs[i]*100).toFixed(0)+'%</span>');
+  });
+}
+function drawRates(rates){
+  document.getElementById("rates").innerHTML=INFO.pops.map(function(p){
+    return '<tr><td><i style="display:inline-block;width:9px;height:9px;border-radius:2px;background:'+POPC[p.key]+';margin-right:6px"></i>'+
+      p.name+' <span style="opacity:.6">('+p.n.toLocaleString("es")+')</span></td><td>'+rates[p.key].toFixed(1)+'</td></tr>';
+  }).join("");
+}
+
+/* ---------------------------------------------------------------- control */
+let state=null, busy=false, auto=false, moves=[];
+const $=function(id){return document.getElementById(id);};
+function post(u,b){return fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},
+  body:JSON.stringify(b)}).then(function(r){return r.json();});}
+
+async function init(){
+  INFO=await (await fetch("/api/info")).json();
+  $("stats").innerHTML="<b>"+INFO.neurons.toLocaleString("es")+"</b> neuronas · <b>"+
+    INFO.synapses.toLocaleString("es")+"</b> sinapsis reales · <b>"+
+    INFO.inhibitory.toLocaleString("es")+"</b> inhibitorias · acierto de la lectura: <b>"+
+    (INFO.accuracy*100).toFixed(0)+"%</b>"+(INFO.baseline?" (sin conectoma: "+(INFO.baseline*100).toFixed(0)+"%)":"");
+  $("legend").innerHTML=INFO.pops.map(function(p){
+    return '<span><i style="background:'+POPC[p.key]+'"></i>'+p.name+'</span>';}).join("");
+  drawBars(INFO.moves.map(function(){return 0;}),null);
+  await doScramble();
+}
+async function doScramble(){
+  auto=false; moves=[];
+  const r=await post("/api/scramble",{depth:INFO.depth});
+  state=r.state; paint(state);
+  $("seq").textContent="revuelto: "+r.scramble.join("  ");
+  $("log").textContent="Cubo revuelto con "+r.scramble.length+" giros. La red nunca vio este estado.";
+  $("status").textContent=""; setBusy(false);
+}
+function setBusy(b){busy=b;$("btnStep").disabled=b;$("btnScramble").disabled=b;}
+async function doStep(){
+  try{ return await doStepInner(); }
+  catch(e){ console.error("[demo] fallo en doStep:",e); $("log").textContent="Error: "+e.message;
+            setBusy(false); auto=false; return true; }
+}
+async function doStepInner(){
+  if(busy||!state){ console.error("[demo] bloqueado: busy="+busy+" state="+(!!state)); return true; }
+  setBusy(true); $("status").textContent="simulando 40 ms de actividad neuronal…";
+  const r=await post("/api/step",{state:state});
+  if(r.done){setBusy(false);return true;}
+  drawRaster(r.spikes); drawRates(r.rates); drawBars(r.probs,r.move);
+  moves.push(r.move);
+  $("log").innerHTML="Giro <b style=\"color:var(--acc)\">"+r.move+"</b> · "+
+    r.total_spikes.toLocaleString("es")+" potenciales de acción · confianza "+
+    (Math.max.apply(null,r.probs)*100).toFixed(0)+"%";
+  $("seq").textContent="mosca: "+moves.join("  ");
+  $("status").textContent="";
+  await new Promise(function(res){animateMove(r.move,res);});
+  state=r.state; paint(state); setBusy(false);
+  if(r.solved){
+    $("log").innerHTML="✅ <b style=\"color:var(--acc)\">Resuelto en "+moves.length+" giros.</b>";
+    auto=false; return true;
+  }
+  return false;
+}
+$("btnScramble").onclick=doScramble;
+$("btnStep").onclick=doStep;
+$("btnAuto").onclick=async function(){
+  if(!INFO||!state){ console.error("[demo] aun cargando"); return; }
+  if(auto){auto=false;$("btnAuto").textContent="Resolver";return;}
+  auto=true; $("btnAuto").textContent="Pausar";
+  for(let i=0;i<INFO.depth*3&&auto;i++){ if(await doStep()) break; }
+  auto=false; $("btnAuto").textContent="Resolver";
+};
+init();
+</script>
+</body>
+</html>
